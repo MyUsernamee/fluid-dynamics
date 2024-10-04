@@ -160,8 +160,10 @@ Grid<float, N, N> calculateDivergence(Grid<FluidData, N, N> &data)
 void applyPressureForce(Grid<FluidData, N, N> &data, float dt)
 {
 
+#pragma omp parallel for
     for (int x = 1; x < N - 1; ++x)
     {
+#pragma omp parallel for
         for (int y = 1; y < N - 1; ++y)
 
         {

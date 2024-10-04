@@ -119,7 +119,7 @@ int main()
 
         ClearBackground(BLACK);
 
-        draw(grid, PRESSURE);
+        draw(grid, COLOR);
 
         auto mouse_p = getLocalPosition(GetMouseX(), GetMouseY());
         auto mouse_d = GetMouseDelta();
@@ -128,8 +128,8 @@ int main()
 
         for (int i = 0; i < 100; ++i)
         {
-            advect(grid, 1.0 / 60.0 / 1000.0);
-            applyPressureForce(grid, 1.0 / 60.0 / 1000.0);
+            advect(grid, 1.0 / 60.0 / 100.0);
+            applyPressureForce(grid, 1.0 / 60.0 / 100.0);
         }
 
         integrate(grid, 1.0 / 60.0);
