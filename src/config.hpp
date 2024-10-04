@@ -3,7 +3,7 @@
 const static int HEIGHT = 720;
 const static int WIDTH = 1280;
 
-const static int N = 720 / 8;
+const static int N = 128;
 const static float TEMPERATURE = 293.17; // Temperature of gas in Kelvin
 
 const static float cell_size = HEIGHT / (float)N;
