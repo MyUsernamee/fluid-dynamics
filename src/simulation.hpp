@@ -14,7 +14,7 @@ int sgn(T val)
     return (T(0) < val) - (val < T(0));
 }
 
-float PVtoDensity(float p, float v)
+__device__ __host__ float PVtoDensity(float p, float v)
 {
 
     auto n = (p * v) / (R * TEMPERATURE);
@@ -36,6 +36,33 @@ struct FluidData
     glm::vec3 color = glm::vec3(0.0);
     bool wall = false;
     float density = PVtoDensity(101352.9, dx *dx);
+    float energy = 0.0;
+
+    FluidData(float pressure, float temperature)
+    {
+        density = PVtoDensity(pressure, dx * dx);
+        energy = (5.0 / 2.0) * pressure * dx * dx;
+    }
+
+    FluidData() {}
+
+    __device__ __host__ FluidData(glm::vec2 vel, glm::vec3 color, bool wall, float density, float energy)
+    {
+        this->vel = vel;
+        this->color = color;
+        this->wall = wall;
+        this->density = density;
+        this->energy = energy;
+    }
+
+    FluidData(glm::vec2 vel, glm::vec3 color, bool wall, float pressure)
+    {
+        this->vel = vel;
+        this->color = color;
+        this->wall = wall;
+        this->density = PVtoDensity(pressure, dx * dx);
+        this->energy = (5.0 / 2.0) * pressure * dx * dx;
+    }
 
     __device__ __host__ FluidData operator+(FluidData b)
     {
@@ -44,6 +71,7 @@ struct FluidData
             this->color + b.color,
             this->wall,
             this->density + b.density,
+            this->energy + b.energy,
         };
     }
 
@@ -54,6 +82,7 @@ struct FluidData
             this->color * b,
             this->wall,
             this->density * b,
+            this->energy * b,
         };
     }
 
@@ -64,6 +93,7 @@ struct FluidData
             this->color / b,
             this->wall,
             this->density / b,
+            this->energy / b,
         };
     }
 
@@ -74,12 +104,20 @@ struct FluidData
             this->color - b.color,
             this->wall,
             this->density - b.density,
+            this->energy - b.energy,
         };
     }
 
     __device__ __host__ float getPressure(float v)
     {
-        return DensityToPV(this->density, v);
+        float pressure = (2.0 / 5.0) * energy / v;
+        return pressure;
+    }
+
+    __device__ __host__ void setPressure(float pressure)
+    {
+        energy = (5.0 / 2.0) * pressure * dx * dx;
+        density = PVtoDensity(pressure, dx * dx);
     }
 };
 
@@ -227,17 +265,23 @@ void fillCircle(Grid<FluidData, N, N> &data, FluidData new_data, int x, int y, f
     }
 }
 
-void integrate(Grid<FluidData, N, N> &data, float dt)
+void setCircleColor(Grid<FluidData, N, N> &data, glm::vec3 color, int x, int y, float r)
 {
 
-    for (int x = 0; x < N; ++x)
+    for (int i = -r / 2.0; i < r / 2.0; ++i)
     {
-        for (int y = 0; y < N; ++y)
-        {
 
-            data.get(x, y).vel -= dt * glm::vec2(0.0, 1.0);
+        for (int j = -r / 2.0; j < r / 2.0; ++j)
+        {
+            data.get(x + i, y + j).color = color;
         }
     }
+}
+
+__device__ void integrate(Grid<FluidData, N, N> &data, float dt, int x, int y)
+{
+
+    data.get(x, y).vel -= dt * glm::vec2(0.0, 9.8);
 }
 
 Vector2 getLocalPosition(int x, int y)

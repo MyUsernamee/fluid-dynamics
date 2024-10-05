@@ -25,24 +25,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
     }
 }
 
-struct AudioBuffer
-{
-
-    float data[AUDIO_BUFFER_SIZE];
-    int index = 0;
-
-    __host__ __device__ void push_sample(float sample)
-    {
-        data[index] = sample;
-        ++index;
-
-        if (index > AUDIO_BUFFER_SIZE)
-        {
-            index = 0;
-        }
-    }
-};
-
 enum DrawMode
 {
 
@@ -125,7 +107,7 @@ void draw(Grid<FluidData, N, N> data, DrawMode mode)
 
             case COLOR:
 
-                c = data.get(x, y).color;
+                c = glm::clamp(data.get(x, y).color, glm::vec3(0.0), glm::vec3(1.0));
 
                 color = ColorFromNormalized({c.x, c.y, c.z, 1.0});
 
@@ -151,7 +133,7 @@ void draw(Grid<FluidData, N, N> data, DrawMode mode)
     }
 }
 
-__global__ void update(Grid<FluidData, N, N> grid, Grid<FluidData, N, N> new_grid, glm::vec2 sample_position, float *o, int index, float dt)
+__global__ void update(Grid<FluidData, N, N> grid, Grid<FluidData, N, N> new_grid, float dt)
 {
 
     int x = threadIdx.x + blockIdx.x * blockDim.x;
@@ -165,11 +147,8 @@ __global__ void update(Grid<FluidData, N, N> grid, Grid<FluidData, N, N> new_gri
 
     applyPressureForce(grid, dt, x, y);
     advect(grid, new_grid, dt, x, y);
-
-    if (x == sample_position.x && y == sample_position.y)
-    {
-        o[index] = grid.get(x, y).getPressure(dx * dx);
-    }
+    // integrate(new_grid, dt, x, y);
+    grid.set(x, y, new_grid.get(x, y));
 }
 
 int main()
@@ -178,16 +157,10 @@ int main()
     InitWindow(WIDTH, HEIGHT, "Fluid Dynamics");
     InitAudioDevice();
 
-    SetAudioStreamBufferSizeDefault(AUDIO_BUFFER_SIZE);
-    AudioStream stream = LoadAudioStream(5000, 16, 1);
-
     dim3 blocks(N / 16 + 1, N / 16 + 1);
     dim3 threads(16, 16);
 
-    PlayAudioStream(stream);
-
-    Grid<FluidData, N, N> grid(FluidData{glm::vec2(0.0, 0.0)});
-    AudioBuffer *buffer = new AudioBuffer();
+    Grid<FluidData, N, N> grid(FluidData(ATM_PRESSURE, ATM_TEMP));
 
     // Make edges walls
     for (int i = 0; i < N; ++i)
@@ -203,10 +176,9 @@ int main()
         grid.get(N - 1, i).density = 0.0;
     }
 
-    Grid<FluidData, N, N> d_grid(FluidData{glm::vec2(0.1, 0.0)});
-    Grid<FluidData, N, N> d_back_grid(FluidData{glm::vec2(0.1, 0.0)});
+    Grid<FluidData, N, N> d_grid = Grid<FluidData, N, N>(FluidData());
+    Grid<FluidData, N, N> d_back_grid = Grid<FluidData, N, N>(FluidData());
     Grid<float, N, N> d_p_grid(0.0);
-    AudioBuffer *d_buff;
 
     delete d_grid.data; // We don't need another array on the cpu
     delete d_back_grid.data;
@@ -215,7 +187,6 @@ int main()
     cudaMalloc(&d_grid.data, sizeof(FluidData) * N * N);
     cudaMalloc(&d_back_grid.data, sizeof(FluidData) * N * N);
     cudaMalloc(&d_p_grid.data, sizeof(float) * N * N);
-    cudaMalloc(&d_buff, sizeof(AudioBuffer));
 
     // SetTargetFPS(60);
 
@@ -226,9 +197,6 @@ int main()
     float *d_o;
     cudaMalloc(&d_o, sizeof(float) * AUDIO_BUFFER_SIZE + 1);
     float *o = new float[AUDIO_BUFFER_SIZE + 1];
-
-    gpuErrchk(cudaMemcpy(d_grid.data, grid.data, sizeof(FluidData) * N * N, cudaMemcpyHostToDevice));
-    gpuErrchk(cudaMemcpy(d_back_grid.data, d_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToDevice));
 
     while (!WindowShouldClose())
     {
@@ -245,10 +213,10 @@ int main()
         // Set the pressure of the cells near the edge but not the edge edge to atmospheric pressure
         for (int i = 0; i < N - 1; ++i)
         {
-            grid.get(1, i + 1).density = PVtoDensity(101325.0, 300.0);
-            grid.get(N - 2, i + 1).density = PVtoDensity(101325.0, 300.0);
-            grid.get(i + 1, 1).density = PVtoDensity(101325.0, 300.0);
-            grid.get(i + 1, N - 2).density = PVtoDensity(101325.0, 300.0);
+            grid.get(1, i + 1).setPressure(ATM_PRESSURE);
+            grid.get(N - 2, i + 1).setPressure(ATM_PRESSURE);
+            grid.get(i + 1, 1).setPressure(ATM_PRESSURE);
+            grid.get(i + 1, N - 2).setPressure(ATM_PRESSURE);
         }
 
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
@@ -258,46 +226,22 @@ int main()
         }
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
         {
-            fillCircle(grid, FluidData{(glm::vec2(mouse_d.x + 0.0001, mouse_d.y)) * 1.0f, glm::vec3(1.0, 0.0, 0.0), false, grid.get(mouse_p.x, mouse_p.y).density * 1.1f}, mouse_p.x, mouse_p.y, mouse_size);
+            fillCircle(grid, FluidData{(glm::vec2(mouse_d.x + 0.0001, mouse_d.y)) * 1.0f, glm::vec3(1.0, 0.0, 0.0), false, grid.get(mouse_p.x, mouse_p.y).getPressure(dx * dx) * 1.1f}, mouse_p.x, mouse_p.y, mouse_size);
         }
         if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
         {
-            fillCircle(grid, FluidData{glm::vec2(0.0), glm::vec3(0.0), false, grid.get(mouse_p.x, mouse_p.y).density / 1.1f}, mouse_p.x, mouse_p.y, mouse_size);
+            fillCircle(grid, FluidData{glm::vec2(0.0), glm::vec3(0.0), false, grid.get(mouse_p.x, mouse_p.y).getPressure(dx * dx) / 1.1f}, mouse_p.x, mouse_p.y, mouse_size);
+        }
+
+        // Just change color
+        if (IsKeyPressed(KEY_R))
+        {
+            setCircleColor(grid, glm::vec3(1.0), mouse_p.x, mouse_p.y, mouse_size);
         }
 
         drawArrow(getDataAtPoint(grid, mouse_p.x, mouse_p.y).vel * cell_size, GetMouseX(), GetMouseY(), 4);
         auto a = getGlobalPosition(mouse_p.x, mouse_p.y);
         DrawCircle(a.x, a.y, 4.0, RED);
-
-        if (IsAudioStreamProcessed(stream))
-        {
-
-            cudaMemcpy(o, d_o, sizeof(float) * AUDIO_BUFFER_SIZE, cudaMemcpyDeviceToHost);
-
-            for (int i = 1; i < AUDIO_BUFFER_SIZE; ++i)
-            {
-                data[i] = (short)((o[i] - o[i - 1]) * 32000. * 0.0001);
-            }
-            data[0] = data[1];
-
-            UpdateAudioStream(stream, data, AUDIO_BUFFER_SIZE);
-            data_index = 0;
-            gpuErrchk(cudaMemcpy(d_grid.data, grid.data, sizeof(FluidData) * N * N, cudaMemcpyHostToDevice));
-            gpuErrchk(cudaMemcpy(d_back_grid.data, d_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToDevice));
-        }
-
-        while (data_index < AUDIO_BUFFER_SIZE)
-        {
-
-            update<<<blocks, threads>>>(d_grid, d_back_grid, glm::vec2(10.0, 10.0), d_o, data_index, 1.0f / 5000.0f);
-            gpuErrchk(cudaMemcpy(d_grid.data, d_back_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToDevice));
-
-            data_index++;
-            if (data_index == AUDIO_BUFFER_SIZE - 1)
-            {
-                gpuErrchk(cudaMemcpy(grid.data, d_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToHost));
-            }
-        }
 
         // Render rect lines to show mouse size and scale
         DrawRectangleLines(GetMouseX() - mouse_size / 2 * cell_size, GetMouseY() - mouse_size / 2 * cell_size, mouse_size * cell_size, mouse_size * cell_size, WHITE);
@@ -312,6 +256,17 @@ int main()
         {
             view_mode = (DrawMode)((view_mode + 1) % 3);
         }
+
+        // Update grid
+
+        gpuErrchk(cudaMemcpy(d_grid.data, grid.data, sizeof(FluidData) * N * N, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(d_back_grid.data, d_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToDevice));
+
+        for (int i = 0; i < 400; ++i)
+        {
+            update<<<blocks, threads>>>(d_grid, d_back_grid, 1.0 / 60.0 / 400.0);
+        }
+        gpuErrchk(cudaMemcpy(grid.data, d_back_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToHost));
 
         EndDrawing();
     }
