@@ -57,7 +57,36 @@ std::pair<T, T> min_max(std::function<T(int index)> f, int count)
     return {min, max};
 }
 
-void draw(Grid<FluidData, N, N> data, DrawMode mode)
+struct Particle
+{
+
+    glm::vec2 position;
+    glm::vec2 velocity;
+    float life = 10.0;
+};
+
+void updateParticles(Grid<FluidData, N, N> data, std::vector<Particle> &particles, float dt)
+{
+    for (auto &particle : particles)
+    {
+
+        auto vel = getDataAtPoint(data, particle.position.x / dx, particle.position.y / dx);
+        particle.velocity = vel.vel / vel.density;
+        particle.position += particle.velocity * dt;
+        particle.life -= dt;
+    }
+
+    for (int i = 0; i < particles.size(); i++)
+    {
+        if (particles.at(i).life <= 0)
+        {
+            particles.erase(particles.begin() + i);
+            i--;
+        }
+    }
+}
+
+void draw(Grid<FluidData, N, N> data, DrawMode mode, std::vector<Particle> particles)
 {
     std::pair<float, float> lim;
     float min;
@@ -131,6 +160,12 @@ void draw(Grid<FluidData, N, N> data, DrawMode mode)
             }
         }
     }
+
+    for (auto particle : particles)
+    {
+
+        DrawCircle((int)(particle.position.x * (float)cell_size / dx) + start_x, (int)(particle.position.y * (float)cell_size / dx) + start_y, 1.0, WHITE);
+    }
 }
 
 __global__ void update(Grid<FluidData, N, N> grid, Grid<FluidData, N, N> new_grid, float dt)
@@ -190,6 +225,8 @@ int main()
 
     // SetTargetFPS(60);
 
+    std::vector<Particle> particles;
+
     auto view_mode = PRESSURE;
     auto mouse_size = 10;
     short *data = new short[AUDIO_BUFFER_SIZE];
@@ -208,7 +245,7 @@ int main()
 
         auto mouse_p = getLocalPosition(GetMouseX(), GetMouseY());
         auto mouse_d = GetMouseDelta();
-        draw(grid, view_mode);
+        draw(grid, view_mode, particles);
 
         // Set the pressure of the cells near the edge but not the edge edge to atmospheric pressure
         for (int i = 0; i < N - 1; ++i)
@@ -239,6 +276,11 @@ int main()
             setCircleColor(grid, glm::vec3(1.0), mouse_p.x, mouse_p.y, mouse_size);
         }
 
+        if (IsKeyPressed(KEY_P))
+        {
+            particles.push_back({glm::vec2(mouse_p.x / (float)N * (dx * N), mouse_p.y / (float)N * (dx * N)), glm::vec2(0.0)});
+        }
+
         drawArrow(getDataAtPoint(grid, mouse_p.x, mouse_p.y).vel * cell_size, GetMouseX(), GetMouseY(), 4);
         auto a = getGlobalPosition(mouse_p.x, mouse_p.y);
         DrawCircle(a.x, a.y, 4.0, RED);
@@ -267,6 +309,9 @@ int main()
             update<<<blocks, threads>>>(d_grid, d_back_grid, 1.0 / 60.0 / 400.0);
         }
         gpuErrchk(cudaMemcpy(grid.data, d_back_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToHost));
+
+        // Update particles
+        updateParticles(grid, particles, 1.0 / 60.0f);
 
         EndDrawing();
     }
