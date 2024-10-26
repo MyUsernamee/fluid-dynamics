@@ -13,7 +13,7 @@ FetchContent_MakeAvailable(glm)
 
 find_package(OpenMP)
 
-file(GLOB_RECURSE SOURCES src/*.cu)
+file(GLOB_RECURSE SOURCES src/main.cu)
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 target_link_libraries(${PROJECT_NAME} PRIVATE raylib glm::glm)

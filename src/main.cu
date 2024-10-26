@@ -11,20 +11,6 @@
 
 #define AUDIO_BUFFER_SIZE 1024
 
-#define gpuErrchk(ans)                        \
-    {                                         \
-        gpuAssert((ans), __FILE__, __LINE__); \
-    }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true)
-{
-    if (code != cudaSuccess)
-    {
-        fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
-        if (abort)
-            exit(code);
-    }
-}
-
 enum DrawMode
 {
 
@@ -34,24 +20,35 @@ enum DrawMode
 
 };
 
+Vector2 getLocalPosition(int x, int y)
+{
+    return {(x - start_x) / cell_size, (y - start_y) / cell_size};
+}
+
+Vector2 getGlobalPosition(int x, int y)
+{
+
+    return {x * cell_size + start_x + cell_size / 2.0f, y * cell_size + start_y + cell_size / 2.0f};
+}
+
 void drawArrow(glm::vec2 direction, int x, int y, int w)
 {
     DrawLineEx({(float)x, (float)y}, {x + direction.x, y + direction.y}, w, WHITE);
 }
 
 template <typename T>
-std::pair<T, T> min_max(std::function<T(int index)> f, int count)
+std::pair<T, T> min_max(std::function<std::pair<bool, T>(int index)> f, int count, T min, T max)
 {
-
-    T min = f(0);
-    T max = f(0);
 
     for (int i = 0; i < count; ++i)
     {
-        T value = f(i);
+        std::pair<bool, T> value = f(i);
 
-        min = std::min(min, value);
-        max = std::max(max, value);
+        if (!value.first)
+            continue;
+
+        min = std::min(min, value.second);
+        max = std::max(max, value.second);
     }
 
     return {min, max};
@@ -65,7 +62,7 @@ struct Particle
     float life = 10.0;
 };
 
-void updateParticles(Grid<FluidData, N, N> data, std::vector<Particle> &particles, float dt)
+void updateParticles(Grid<FluidData> data, std::vector<Particle> &particles, float dt)
 {
     for (auto &particle : particles)
     {
@@ -86,13 +83,13 @@ void updateParticles(Grid<FluidData, N, N> data, std::vector<Particle> &particle
     }
 }
 
-void draw(Grid<FluidData, N, N> data, DrawMode mode, std::vector<Particle> particles)
+void draw(Grid<FluidData> data, DrawMode mode, std::vector<Particle> particles)
 {
     std::pair<float, float> lim;
     float min;
     float max;
     lim = min_max<float>([&](int i)
-                         { return data.data[i].getPressure(dx * dx); }, N * N);
+                         { return std::make_pair(!data.data[i].wall, data.data[i].getPressure(dx * dx)); }, N * N, 99999999999999999999999.0, 0.0);
 
     max = lim.second;
     min = lim.first;
@@ -168,24 +165,6 @@ void draw(Grid<FluidData, N, N> data, DrawMode mode, std::vector<Particle> parti
     }
 }
 
-__global__ void update(Grid<FluidData, N, N> grid, Grid<FluidData, N, N> new_grid, float dt)
-{
-
-    int x = threadIdx.x + blockIdx.x * blockDim.x;
-    int y = threadIdx.y + blockIdx.y * blockDim.y;
-
-    if (x >= N - 1 || y >= N - 1 || x < 0 || y < 0)
-        return;
-
-    if (grid.get(x, y).wall)
-        return;
-
-    applyPressureForce(grid, dt, x, y);
-    advect(grid, new_grid, dt, x, y);
-    // integrate(new_grid, dt, x, y);
-    grid.set(x, y, new_grid.get(x, y));
-}
-
 int main()
 {
 
@@ -195,45 +174,12 @@ int main()
     dim3 blocks(N / 16 + 1, N / 16 + 1);
     dim3 threads(16, 16);
 
-    Grid<FluidData, N, N> grid(FluidData(ATM_PRESSURE, ATM_TEMP));
-
-    // Make edges walls
-    for (int i = 0; i < N; ++i)
-    {
-        grid.get(i, 0).wall = true;
-        grid.get(i, N - 1).wall = true;
-        grid.get(0, i).wall = true;
-        grid.get(N - 1, i).wall = true;
-
-        grid.get(i, 0).density = 0.0;
-        grid.get(i, N - 1).density = 0.0;
-        grid.get(0, i).density = 0.0;
-        grid.get(N - 1, i).density = 0.0;
-    }
-
-    Grid<FluidData, N, N> d_grid = Grid<FluidData, N, N>(FluidData());
-    Grid<FluidData, N, N> d_back_grid = Grid<FluidData, N, N>(FluidData());
-    Grid<float, N, N> d_p_grid(0.0);
-
-    delete d_grid.data; // We don't need another array on the cpu
-    delete d_back_grid.data;
-    delete d_p_grid.data;
-
-    cudaMalloc(&d_grid.data, sizeof(FluidData) * N * N);
-    cudaMalloc(&d_back_grid.data, sizeof(FluidData) * N * N);
-    cudaMalloc(&d_p_grid.data, sizeof(float) * N * N);
-
-    // SetTargetFPS(60);
+    Simulation sim(10.0, N, N, BoundaryCondition::CLOSED, FluidData(ATM_PRESSURE, ATM_TEMP, dx));
 
     std::vector<Particle> particles;
 
     auto view_mode = PRESSURE;
     auto mouse_size = 10;
-    short *data = new short[AUDIO_BUFFER_SIZE];
-    int data_index = 0;
-    float *d_o;
-    cudaMalloc(&d_o, sizeof(float) * AUDIO_BUFFER_SIZE + 1);
-    float *o = new float[AUDIO_BUFFER_SIZE + 1];
 
     while (!WindowShouldClose())
     {
@@ -245,43 +191,34 @@ int main()
 
         auto mouse_p = getLocalPosition(GetMouseX(), GetMouseY());
         auto mouse_d = GetMouseDelta();
-        draw(grid, view_mode, particles);
-
-        // Set the pressure of the cells near the edge but not the edge edge to atmospheric pressure
-        for (int i = 0; i < N - 1; ++i)
-        {
-            grid.get(1, i + 1).setPressure(ATM_PRESSURE);
-            grid.get(N - 2, i + 1).setPressure(ATM_PRESSURE);
-            grid.get(i + 1, 1).setPressure(ATM_PRESSURE);
-            grid.get(i + 1, N - 2).setPressure(ATM_PRESSURE);
-        }
+        draw(sim.data, view_mode, particles);
 
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT))
         {
             // Make Wall
-            fillCircle(grid, FluidData{glm::vec2(0.0), glm::vec3(0.0), true, 0.0}, mouse_p.x, mouse_p.y, mouse_size);
+            fillCircle(sim.data, FluidData{glm::vec2(0.0), glm::vec3(0.0), true, 0.0, sim.dx}, mouse_p.x, mouse_p.y, mouse_size);
         }
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
         {
-            fillCircle(grid, FluidData{(glm::vec2(mouse_d.x + 0.0001, mouse_d.y)) * 1.0f, glm::vec3(1.0, 0.0, 0.0), false, grid.get(mouse_p.x, mouse_p.y).getPressure(dx * dx) * 1.1f}, mouse_p.x, mouse_p.y, mouse_size);
+            fillCircle(sim.data, FluidData{(glm::vec2(mouse_d.x, mouse_d.y)) * 1.0f, glm::vec3(1.0, 0.0, 0.0), false, sim.data.get(mouse_p.x, mouse_p.y).getPressure(sim.dx * sim.dx) * 1.1f, sim.dx}, mouse_p.x, mouse_p.y, mouse_size);
         }
         if (IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
         {
-            fillCircle(grid, FluidData{glm::vec2(0.0), glm::vec3(0.0), false, grid.get(mouse_p.x, mouse_p.y).getPressure(dx * dx) / 1.1f}, mouse_p.x, mouse_p.y, mouse_size);
+            fillCircle(sim.data, FluidData{glm::vec2(0.0), glm::vec3(0.0), false, sim.data.get(mouse_p.x, mouse_p.y).getPressure(dx * dx) / 1.1f, sim.dx}, mouse_p.x, mouse_p.y, mouse_size);
         }
 
         // Just change color
         if (IsKeyPressed(KEY_R))
         {
-            setCircleColor(grid, glm::vec3(1.0), mouse_p.x, mouse_p.y, mouse_size);
+            setCircleColor(sim.data, glm::vec3(1.0), mouse_p.x, mouse_p.y, mouse_size);
         }
 
-        if (IsKeyPressed(KEY_P))
+        if (IsKeyDown(KEY_P))
         {
             particles.push_back({glm::vec2(mouse_p.x / (float)N * (dx * N), mouse_p.y / (float)N * (dx * N)), glm::vec2(0.0)});
         }
 
-        drawArrow(getDataAtPoint(grid, mouse_p.x, mouse_p.y).vel * cell_size, GetMouseX(), GetMouseY(), 4);
+        drawArrow(getDataAtPoint(sim.data, mouse_p.x, mouse_p.y).vel * cell_size, GetMouseX(), GetMouseY(), 4);
         auto a = getGlobalPosition(mouse_p.x, mouse_p.y);
         DrawCircle(a.x, a.y, 4.0, RED);
 
@@ -298,20 +235,20 @@ int main()
         {
             view_mode = (DrawMode)((view_mode + 1) % 3);
         }
+        sim.syncDataToGPU();
 
-        // Update grid
-
-        gpuErrchk(cudaMemcpy(d_grid.data, grid.data, sizeof(FluidData) * N * N, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(d_back_grid.data, d_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToDevice));
-
-        for (int i = 0; i < 400; ++i)
+        float t1 = sim.getSafeDT(1.0 / 60.0f / 100.0) * 0.5;
+        float t = 0.0;
+        while (t < 1.0 / 60.0f)
         {
-            update<<<blocks, threads>>>(d_grid, d_back_grid, 1.0 / 60.0 / 400.0);
+            float dt = max(min(t1, 1.0 / 60.0f - t), 1.0 / 60.0 / 4096.0f);
+            t += dt;
+            sim.stepNoSync(dt);
         }
-        gpuErrchk(cudaMemcpy(grid.data, d_back_grid.data, sizeof(FluidData) * N * N, cudaMemcpyDeviceToHost));
+        sim.syncDataToCPU();
 
         // Update particles
-        updateParticles(grid, particles, 1.0 / 60.0f);
+        updateParticles(sim.data, particles, 1.0 / 60.0f);
 
         EndDrawing();
     }
